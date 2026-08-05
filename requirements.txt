@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+pydantic-settings>=2.1
+PyYAML>=6.0
+numpy>=1.24
+h5py>=3.10
+httpx>=0.27
+websockets>=12.0

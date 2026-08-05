@@ -1,0 +1,49 @@
+http:
+  host: "0.0.0.0"
+  port: 8080
+  api_key: null  # set to enable X-API-Key auth
+
+sdk:
+  root: "/home/astribot/Downloads/astribot_sdk_aarch64"
+  control_hz: 250.0
+  node_name: "astribot_robot_bridge"
+
+actions:
+  # Prefer symlink assets/actions_link -> old repo actions/
+  manifest: "assets/actions_link/manifest.json"
+
+state:
+  default_hz: 50.0
+  max_hz: 100.0
+  default_fields:
+    - "joints.pos"
+    - "joints.vel"
+
+realtime:
+  max_hz: 250.0
+  default_hz: 50.0
+  control_way: "filter"
+  max_step_delta_rad: 0.35
+  max_abs_rad: 3.5
+  gripper_min: 0.0
+  gripper_max: 100.0
+
+audio:
+  dataset_dir: "/home/astribot/audio_dataset"
+  chunk_seconds: 0.1
+  default_mode: "service"  # service | stream
+
+control_rights:
+  auto_reacquire: true
+  reacquire_cooldown_s: 3.0
+  max_reacquire_attempts_per_loss: 1
+  probe_interval_s: 1.0
+
+safety:
+  enforce_limits: true
+
+logging:
+  level: "INFO"
+  file: "logs/bridge.log"
+  rotate_mb: 20
+  backup_count: 5
