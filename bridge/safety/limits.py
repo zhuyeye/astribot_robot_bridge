@@ -136,3 +136,23 @@ def check_joint_targets(
                     )
 
     return violations
+
+
+def clamp_group_step_delta(
+    prev: list[list[float]],
+    cmd: list[list[float]],
+    max_delta: float,
+) -> list[list[float]]:
+    """Limit per-joint change from prev to cmd (used on SDK output path)."""
+    if max_delta <= 0:
+        return cmd
+    out: list[list[float]] = []
+    for g0, g1 in zip(prev, cmd):
+        row: list[float] = []
+        for v0, v1 in zip(g0, g1):
+            d = float(v1) - float(v0)
+            if abs(d) > max_delta:
+                v1 = float(v0) + max(-max_delta, min(max_delta, d))
+            row.append(float(v1))
+        out.append(row)
+    return out

@@ -31,6 +31,7 @@ async def ready(request: Request) -> dict:
         "audio_ready": bridge.audio_robot.ready,
         "ready": ready_flag,
         "control": bridge.arbiter.to_dict(),
+        "control_context": bridge.control_context.to_dict(),
         "control_rights": rights,
         "audio": {
             "worker_alive": audio_status["worker_alive"],
@@ -52,6 +53,7 @@ async def status(request: Request) -> dict:
     return ok(
         {
             "control": bridge.arbiter.to_dict(),
+            "control_context": bridge.control_context.to_dict(),
             "control_rights": bridge.control_rights.snapshot(),
             "trajectory": bridge.trajectory.get_status(),
             "audio": audio_status,

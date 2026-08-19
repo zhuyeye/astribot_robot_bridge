@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from bridge.schemas.common import ok
-from bridge.schemas.requests import PlayActionRequest
+from bridge.schemas.requests import PlayActionRequest, StopActionRequest
 
 router = APIRouter(prefix="/v1/actions", tags=["actions"])
 
@@ -37,6 +37,8 @@ async def play(request: Request, body: PlayActionRequest) -> dict:
         request_id=body.request_id,
         force=body.force,
         reacquire_if_needed=body.reacquire_if_needed,
+        expected_current_session_id=body.expected_current_session_id,
+        supersedes_session_id=body.supersedes_session_id,
     )
     result.update(
         {
@@ -50,7 +52,7 @@ async def play(request: Request, body: PlayActionRequest) -> dict:
 
 
 @router.post("/stop")
-async def stop(request: Request) -> dict:
-    result = _state(request).trajectory.stop()
+async def stop(request: Request, body: StopActionRequest) -> dict:
+    result = _state(request).trajectory.stop(body.session_id)
     result.update({"resource": "actions.playback", "execution": "sync", "operation_status": "stopped"})
     return ok(result)

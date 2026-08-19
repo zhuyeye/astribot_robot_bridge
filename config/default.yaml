@@ -22,8 +22,13 @@ state:
 realtime:
   max_hz: 250.0
   default_hz: 50.0
+  control_hz: 250.0          # Orin -> SDK output rate
+  default_source_hz: 30.0    # blend guess when source_hz omitted and no interval yet
+  min_blend_s: 0.01
+  max_blend_s: 0.2
   control_way: "filter"
-  max_step_delta_rad: 0.35
+  max_step_delta_rad: 0.35   # per client frame @ source_hz; worker scales to control_hz
+  step_delta_slack: 2.0
   max_abs_rad: 3.5
   gripper_min: 0.0
   gripper_max: 100.0

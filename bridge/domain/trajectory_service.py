@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from bridge.domain.arbiter import ControlArbiter, ControlMode
+from bridge.domain.control_context import ControlContext
 from bridge.domain.control_rights import ControlRightsManager
 from bridge.domain.trajectory_lib import ActionTrajectory, load_action_library, load_action_tags
 from bridge.robot.adapter import RobotAdapter
-from bridge.schemas.common import BridgeError
+from bridge.schemas.common import BridgeError, StaleSessionError
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class PlayCommand:
     request_id: str
     force: bool
     generation: int
+    session_id: str
 
 
 class TrajectoryService:
@@ -37,6 +39,7 @@ class TrajectoryService:
         robot: RobotAdapter,
         arbiter: ControlArbiter,
         control_rights: ControlRightsManager,
+        control_context: ControlContext,
         *,
         manifest_path: Path,
         force_rebuild: bool = False,
@@ -44,6 +47,7 @@ class TrajectoryService:
         self.robot = robot
         self.arbiter = arbiter
         self.control_rights = control_rights
+        self.control_context = control_context
         self.manifest_path = manifest_path
         self.actions: dict[str, ActionTrajectory] = {}
         self.action_tags: dict[str, list[str]] = {}
@@ -57,6 +61,8 @@ class TrajectoryService:
         self.state = STATE_HOLDING
         self.current_action_id: str | None = None
         self.current_request_id: str | None = None
+        self.current_session_id: str | None = None
+        self.last_terminal_reason: str | None = None
         self.last_error: str | None = None
         self._last_cmd: list[list[float]] | None = None
         self._run_state = STATE_HOLDING
@@ -70,6 +76,14 @@ class TrajectoryService:
 
         self._worker = threading.Thread(target=self._worker_loop, name="traj-worker", daemon=True)
         self._worker.start()
+
+    @staticmethod
+    def _max_abs_delta(groups_a: list[list[float]], groups_b: list[list[float]]) -> float:
+        max_delta = 0.0
+        for ga, gb in zip(groups_a, groups_b):
+            for va, vb in zip(ga, gb):
+                max_delta = max(max_delta, abs(vb - va))
+        return max_delta
 
     def close(self) -> None:
         self._shutdown.set()
@@ -117,6 +131,8 @@ class TrajectoryService:
                 "run_state": self._run_state,
                 "action_id": self.current_action_id,
                 "request_id": self.current_request_id,
+                "session_id": self.current_session_id,
+                "terminal_reason": self.last_terminal_reason,
                 "generation": self._local_generation,
                 "error": self.last_error,
             }
@@ -128,20 +144,39 @@ class TrajectoryService:
         request_id: str = "",
         force: bool = False,
         reacquire_if_needed: bool = False,
+        expected_current_session_id: str | None = None,
+        supersedes_session_id: str | None = None,
     ) -> dict[str, Any]:
         self.control_rights.ensure(reacquire_if_needed=reacquire_if_needed)
+        if not self.control_context.matches_expected(expected_current_session_id):
+            snap = self.control_context.snapshot()
+            logger.warning(
+                "trajectory stale_play request_id=%s action_id=%s expected_current_session_id=%s active_session_id=%s active_mode=%s",
+                request_id,
+                action_id,
+                expected_current_session_id,
+                snap.active_session_id,
+                snap.active_mode,
+            )
+            raise StaleSessionError(
+                expected_session_id=expected_current_session_id,
+                active_session_id=snap.active_session_id,
+                active_mode=snap.active_mode,
+            )
         requested_tag_members = self.action_tags.get(action_id, [])
         resolved = self._resolve_action_id(action_id)
         if resolved is None:
             raise BridgeError("unknown_action", f"unknown action_id: {action_id}", status_code=404)
         logger.info(
-            "trajectory play requested action=%s resolved=%s force=%s request_id=%s state=%s current=%s",
+            "trajectory play requested action=%s resolved=%s force=%s request_id=%s state=%s current=%s expected_current_session_id=%s supersedes_session_id=%s",
             action_id,
             resolved,
             force,
             request_id,
             self.state,
             self.current_action_id,
+            expected_current_session_id,
+            supersedes_session_id,
         )
 
         with self._play_cv:
@@ -175,6 +210,12 @@ class TrajectoryService:
                 with self._play_cv:
                     self._local_generation += 1
                     self._pending = None
+                    self.last_terminal_reason = "preempted"
+                    logger.info(
+                        "trajectory play preempted session_id=%s request_id=%s",
+                        self.current_session_id,
+                        self.current_request_id,
+                    )
                     self._play_cv.notify_all()
 
             self._control_gen = self.arbiter.acquire(
@@ -183,38 +224,76 @@ class TrajectoryService:
                 force=force,
                 on_cancel=_cancel,
             )
+            session_id, _ = self.control_context.issue_session("playback", self._control_gen)
             self._local_generation += 1
             self._pending = PlayCommand(
                 action_id=resolved,
                 request_id=request_id,
                 force=force,
                 generation=self._local_generation,
+                session_id=session_id,
             )
             self.state = STATE_PLAYING
             self._run_state = "transitioning"
             self.current_action_id = resolved
             self.current_request_id = request_id
+            self.current_session_id = session_id
+            self.last_terminal_reason = None
             self.last_error = None
             self._play_cv.notify_all()
+            logger.info(
+                "trajectory play accepted session_id=%s request_id=%s action_id=%s gen=%s",
+                session_id,
+                request_id,
+                resolved,
+                self._control_gen,
+            )
 
         return {
             "accepted": True,
             "state": STATE_PLAYING,
             "action_id": resolved,
             "request_id": request_id,
+            "session_id": session_id,
+            "supersedes_session_id": supersedes_session_id,
             "generation": self._local_generation,
         }
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, session_id: str) -> dict[str, Any]:
+        if session_id != self.current_session_id:
+            snap = self.control_context.snapshot()
+            logger.warning(
+                "trajectory stale_stop session_id=%s active_session_id=%s active_mode=%s",
+                session_id,
+                snap.active_session_id,
+                snap.active_mode,
+            )
+            raise StaleSessionError(
+                provided_session_id=session_id,
+                active_session_id=snap.active_session_id,
+                active_mode=snap.active_mode,
+            )
         with self._play_cv:
             self._local_generation += 1
             self._pending = None
             self.state = STATE_HOLDING
             self._run_state = STATE_HOLDING
+            self.last_terminal_reason = "stopped"
             self._play_cv.notify_all()
         if self._control_gen is not None:
             self.arbiter.release(self._control_gen)
             self._control_gen = None
+        if self.current_session_id is not None:
+            self.control_context.terminate_session(self.current_session_id)
+        logger.info(
+            "trajectory stopped session_id=%s request_id=%s terminal_reason=%s",
+            session_id,
+            self.current_request_id,
+            self.last_terminal_reason,
+        )
+        self.current_action_id = None
+        self.current_request_id = None
+        self.current_session_id = None
         return self.get_status()
 
     def interrupt_for_estop(self) -> None:
@@ -225,8 +304,11 @@ class TrajectoryService:
             self._run_state = STATE_HOLDING
             self.current_action_id = None
             self.current_request_id = None
+            self.current_session_id = None
+            self.last_terminal_reason = "stopped"
             self._play_cv.notify_all()
         self._control_gen = None
+        self.control_context.clear_for_estop()
 
     def on_control_rights_lost(self) -> None:
         with self._play_cv:
@@ -236,9 +318,12 @@ class TrajectoryService:
             self._run_state = "control_lost"
             self.current_action_id = None
             self.current_request_id = None
+            self.current_session_id = None
+            self.last_terminal_reason = "control_lost"
             self.last_error = "control rights lost"
             self._play_cv.notify_all()
         self._control_gen = None
+        self.control_context.clear_for_estop()
 
     def _resolve_action_id(self, requested: str) -> str | None:
         tag_matches = self.action_tags.get(requested, [])
@@ -266,17 +351,35 @@ class TrajectoryService:
                     self.last_error = str(exc)
                     self.state = STATE_HOLDING
                     self._run_state = "error"
+                    self.last_terminal_reason = "error"
                 self.arbiter.set_error(str(exc))
-                logger.exception("playback error")
+                logger.exception(
+                    "trajectory playback error session_id=%s request_id=%s action_id=%s",
+                    cmd.session_id,
+                    cmd.request_id,
+                    cmd.action_id,
+                )
                 traceback.print_exc()
 
             with self._lock:
                 if self._pending is None and self._local_generation == cmd.generation:
                     self.state = STATE_HOLDING
                     self._run_state = STATE_HOLDING
+                    self.last_terminal_reason = self.last_terminal_reason or "completed"
                     if self._control_gen is not None:
                         self.arbiter.release(self._control_gen)
                         self._control_gen = None
+                    self.control_context.terminate_session(cmd.session_id)
+                    logger.info(
+                        "trajectory playback finished session_id=%s request_id=%s action_id=%s terminal_reason=%s",
+                        cmd.session_id,
+                        cmd.request_id,
+                        cmd.action_id,
+                        self.last_terminal_reason,
+                    )
+                    self.current_action_id = None
+                    self.current_request_id = None
+                    self.current_session_id = None
 
     def _play_action(self, cmd: PlayCommand) -> None:
         action = self.actions[cmd.action_id]
@@ -313,8 +416,17 @@ class TrajectoryService:
         target = [list(g) for g in action.waypoints[0]]
         current = self._get_current_command(action)
         duration = self._calc_transition_duration(current, target, action)
+        max_delta = self._max_abs_delta(current, target)
         with self._lock:
             self._run_state = "transitioning"
+        logger.info(
+            "trajectory first_frame_transition session_id=%s request_id=%s action_id=%s duration=%.3f max_delta_rad=%.4f",
+            cmd.session_id,
+            cmd.request_id,
+            cmd.action_id,
+            duration,
+            max_delta,
+        )
         self.robot.run_sync_with_timeout(
             self.robot.move_joints_position,
             action.names,
@@ -331,6 +443,14 @@ class TrajectoryService:
         dt = 1.0 / action.control_hz
         with self._lock:
             self._run_state = STATE_PLAYING
+        logger.info(
+            "trajectory frame_loop_started session_id=%s request_id=%s action_id=%s control_hz=%s loop=%s",
+            cmd.session_id,
+            cmd.request_id,
+            cmd.action_id,
+            action.control_hz,
+            action.loop,
+        )
 
         while not self._shutdown.is_set() and self._local_generation == cmd.generation:
             for waypoint in action.waypoints:

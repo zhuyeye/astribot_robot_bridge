@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from bridge.schemas.common import ok
 from bridge.schemas.requests import (
+    CloseRealtimeRequest,
     GripperRequest,
     MoveToCartesianRequest,
     MoveToHomeRequest,
@@ -38,6 +39,8 @@ async def move_to_joints(request: Request, body: MoveToJointsRequest):
         force=body.force,
         wait=body.wait,
         reacquire_if_needed=body.reacquire_if_needed,
+        request_id=body.request_id,
+        expected_current_session_id=body.expected_current_session_id,
     )
     result.update(
         {
@@ -61,6 +64,8 @@ async def move_to_cartesian(request: Request, body: MoveToCartesianRequest):
         force=body.force,
         wait=body.wait,
         reacquire_if_needed=body.reacquire_if_needed,
+        request_id=body.request_id,
+        expected_current_session_id=body.expected_current_session_id,
     )
     result.update(
         {
@@ -83,6 +88,8 @@ async def move_to_home(request: Request, body: MoveToHomeRequest | None = None):
         force=body.force,
         wait=body.wait,
         reacquire_if_needed=body.reacquire_if_needed,
+        request_id=body.request_id,
+        expected_current_session_id=body.expected_current_session_id,
     )
     result.update(
         {
@@ -107,6 +114,8 @@ async def move_to_waypoints(request: Request, body: MoveToWaypointsRequest):
         force=body.force,
         wait=body.wait,
         reacquire_if_needed=body.reacquire_if_needed,
+        request_id=body.request_id,
+        expected_current_session_id=body.expected_current_session_id,
     )
     result.update(
         {
@@ -124,10 +133,17 @@ async def move_to_waypoints(request: Request, body: MoveToWaypointsRequest):
 async def open_realtime(request: Request, body: RealtimeSessionRequest) -> dict:
     result = _state(request).motion.open_realtime_session(
             rate_hz=body.rate_hz,
+            source_hz=body.source_hz,
+            control_hz=body.control_hz,
             control_way=body.control_way,
             space=body.space,
             force=body.force,
-            reacquire_if_needed=body.reacquire_if_needed,
+            reacquire_if_needed=bool(body.reacquire_if_needed),
+            request_id=body.request_id,
+            expected_current_session_id=body.expected_current_session_id,
+            supersedes_session_id=body.supersedes_session_id,
+            prefer_latest=body.prefer_latest,
+            ack_mode=body.ack_mode,
         )
     result.update({"resource": "motion.realtime", "execution": "sync", "operation_status": "opened"})
     return ok(result)
@@ -138,6 +154,7 @@ async def realtime_command(request: Request, body: RealtimeCommandRequest) -> di
     bridge = _state(request)
     result = await bridge.control_robot.run(
         bridge.motion.apply_realtime_command,
+        session_id=body.session_id,
         targets=body.targets,
         q=body.q,
         layout=body.layout,
@@ -151,8 +168,8 @@ async def realtime_command(request: Request, body: RealtimeCommandRequest) -> di
 
 
 @router.post("/realtime/close")
-async def close_realtime(request: Request) -> dict:
-    result = _state(request).motion.close_realtime_session()
+async def close_realtime(request: Request, body: CloseRealtimeRequest) -> dict:
+    result = _state(request).motion.close_realtime_session(session_id=body.session_id, terminal_reason="completed")
     result.update({"resource": "motion.realtime", "execution": "sync", "operation_status": "closed"})
     return ok(result)
 

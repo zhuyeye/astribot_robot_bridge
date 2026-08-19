@@ -19,6 +19,7 @@ from bridge.api import ws_state as ws_routes
 from bridge.config import BRIDGE_ROOT, BridgeConfig, get_config
 from bridge.domain.arbiter import ControlArbiter
 from bridge.domain.audio_service import AudioService
+from bridge.domain.control_context import ControlContext
 from bridge.domain.control_rights import ControlRightsManager
 from bridge.domain.info_service import InfoService
 from bridge.domain.motion_service import MotionService
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     logger.info("starting asribot_robot_bridge (root=%s)", BRIDGE_ROOT)
 
     arbiter = ControlArbiter()
+    control_context = ControlContext()
     control_robot = RobotAdapter(
         sdk_root=Path(config.sdk.root),
         freq=config.sdk.control_hz,
@@ -89,12 +91,14 @@ async def lifespan(app: FastAPI):
         control_robot,
         arbiter,
         rights,
+        control_context,
         manifest_path=config.manifest_path,
     )
     motion_svc = MotionService(
         control_robot,
         arbiter,
         rights,
+        control_context,
         config,
         on_estop_hooks=[trajectory_svc.interrupt_for_estop],
     )
@@ -109,6 +113,7 @@ async def lifespan(app: FastAPI):
         reader_robot=reader_robot,
         audio_robot=audio_robot,
         arbiter=arbiter,
+        control_context=control_context,
         control_rights=rights,
         info=info_svc,
         motion=motion_svc,

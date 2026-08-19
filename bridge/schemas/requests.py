@@ -12,6 +12,13 @@ class PlayActionRequest(BaseModel):
     request_id: str = ""
     force: bool = False
     reacquire_if_needed: bool | None = None
+    expected_current_session_id: str | None = None
+    supersedes_session_id: str | None = None
+
+
+class StopActionRequest(BaseModel):
+    session_id: str
+    request_id: str = ""
 
 
 class MoveToJointsRequest(BaseModel):
@@ -21,6 +28,8 @@ class MoveToJointsRequest(BaseModel):
     force: bool = False
     wait: bool = False
     reacquire_if_needed: bool | None = None
+    request_id: str = ""
+    expected_current_session_id: str | None = None
 
 
 class MoveToCartesianRequest(BaseModel):
@@ -31,6 +40,8 @@ class MoveToCartesianRequest(BaseModel):
     force: bool = False
     wait: bool = False
     reacquire_if_needed: bool | None = None
+    request_id: str = ""
+    expected_current_session_id: str | None = None
 
 
 class MoveToHomeRequest(BaseModel):
@@ -39,6 +50,8 @@ class MoveToHomeRequest(BaseModel):
     force: bool = False
     wait: bool = False
     reacquire_if_needed: bool | None = None
+    request_id: str = ""
+    expected_current_session_id: str | None = None
 
 
 class MoveToWaypointsRequest(BaseModel):
@@ -50,24 +63,45 @@ class MoveToWaypointsRequest(BaseModel):
     force: bool = False
     wait: bool = False
     reacquire_if_needed: bool | None = None
+    request_id: str = ""
+    expected_current_session_id: str | None = None
 
 
 class RealtimeSessionRequest(BaseModel):
+    # Legacy: alone → treated as source_hz (upsample to control_hz). With source_hz → control alias.
     rate_hz: float | None = None
+    # Client send rate for qpos (optional). Improves blend timing when known.
+    source_hz: float | None = None
+    # Robot output rate; defaults to config realtime.control_hz (250).
+    control_hz: float | None = None
     control_way: str | None = None
     space: Literal["joints", "cartesian"] = "joints"
     force: bool = False
     reacquire_if_needed: bool | None = None
+    request_id: str = ""
+    expected_current_session_id: str | None = None
+    supersedes_session_id: str | None = None
+    # True: overwrite latest target each command; control loop clamps toward it (no time blend).
+    prefer_latest: bool = True
+    # every/drain_async: reply per-command ack; none: skip WS ack. Unknown values ignored upstream.
+    ack_mode: Literal["every", "drain_async", "none"] | None = None
 
 
 class RealtimeCommandRequest(BaseModel):
+    session_id: str
     targets: dict[str, list[float]] | None = None
     q: list[float] | None = None
     layout: list[str] | None = None
     names: list[str] | None = None
     poses: list[list[float]] | None = None
     check_step_delta: bool = True
+    # When true, step limiting runs on SDK output (after interp), not on incoming client frames.
     reacquire_if_needed: bool | None = None
+
+
+class CloseRealtimeRequest(BaseModel):
+    session_id: str
+    request_id: str = ""
 
 
 class GripperRequest(BaseModel):

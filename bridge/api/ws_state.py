@@ -9,6 +9,8 @@ import time
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from bridge.schemas.common import BridgeError
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websocket"])
@@ -54,6 +56,13 @@ async def ws_state(
 async def ws_realtime(websocket: WebSocket) -> None:
     await websocket.accept()
     bridge = _bridge(websocket)
+    bound_session_id: str | None = None
+    client = websocket.client.host if websocket.client else "-"
+    logger.info("realtime ws connected client=%s", client)
+
+    def _should_send_ack() -> bool:
+        return bridge.motion.realtime_ack_mode() != "none"
+
     try:
         while True:
             message = await websocket.receive()
@@ -68,47 +77,107 @@ async def ws_realtime(websocket: WebSocket) -> None:
                 await websocket.send_json({"cmd": "pong", "t": time.time()})
                 continue
             if cmd == "close":
-                result = bridge.motion.close_realtime_session()
+                logger.info(
+                    "realtime ws close client=%s session_id=%s bound_session_id=%s",
+                    client,
+                    payload.get("session_id", ""),
+                    bound_session_id,
+                )
+                result = bridge.motion.close_realtime_session(
+                    session_id=payload.get("session_id", ""),
+                    terminal_reason="completed",
+                )
+                if bound_session_id == result.get("session_id"):
+                    bound_session_id = None
                 await websocket.send_json({"cmd": "closed", **result})
                 break
             if cmd == "open":
+                logger.info(
+                    "realtime ws open client=%s request_id=%s expected_current_session_id=%s",
+                    client,
+                    payload.get("request_id", ""),
+                    payload.get("expected_current_session_id"),
+                )
                 result = bridge.motion.open_realtime_session(
                     rate_hz=payload.get("rate_hz"),
+                    source_hz=payload.get("source_hz"),
+                    control_hz=payload.get("control_hz"),
                     control_way=payload.get("control_way"),
                     space=payload.get("space", "joints"),
                     force=bool(payload.get("force", False)),
                     reacquire_if_needed=bool(payload.get("reacquire_if_needed", False)),
+                    request_id=payload.get("request_id", ""),
+                    expected_current_session_id=payload.get("expected_current_session_id"),
+                    supersedes_session_id=payload.get("supersedes_session_id"),
+                    prefer_latest=bool(payload.get("prefer_latest", True)),
+                    ack_mode=payload.get("ack_mode"),
                 )
+                bound_session_id = result.get("session_id")
                 await websocket.send_json({"cmd": "opened", **result})
                 continue
 
-            result = await bridge.control_robot.run(
-                bridge.motion.apply_realtime_command,
-                targets=payload.get("targets"),
-                q=payload.get("q"),
-                layout=payload.get("layout"),
-                names=payload.get("names"),
-                poses=payload.get("poses"),
-                check_step_delta=bool(payload.get("check_step_delta", True)),
-                reacquire_if_needed=bool(payload.get("reacquire_if_needed", False)),
-            )
+            try:
+                result = await bridge.control_robot.run(
+                    bridge.motion.apply_realtime_command,
+                    session_id=payload.get("session_id", ""),
+                    targets=payload.get("targets"),
+                    q=payload.get("q"),
+                    layout=payload.get("layout"),
+                    names=payload.get("names"),
+                    poses=payload.get("poses"),
+                    check_step_delta=bool(payload.get("check_step_delta", True)),
+                    reacquire_if_needed=bool(payload.get("reacquire_if_needed", False)),
+                )
+            except BridgeError as exc:
+                # Late frames after close/play: soft reject so client drain_async does not see a dead WS.
+                logger.warning(
+                    "realtime ws command_rejected client=%s session_id=%s seq=%s reason=%s",
+                    client,
+                    payload.get("session_id", ""),
+                    payload.get("seq"),
+                    exc.code,
+                )
+                if not _should_send_ack():
+                    continue
+                await websocket.send_json(
+                    {
+                        "cmd": "ack",
+                        "seq": payload.get("seq"),
+                        "accepted": False,
+                        "reason": exc.code,
+                        "message": exc.message,
+                    }
+                )
+                continue
+
+            if not _should_send_ack():
+                continue
             reply = {"cmd": "ack", "seq": payload.get("seq"), **result}
             if payload.get("return_state"):
                 reply["state"] = await bridge.reader_robot.run(bridge.info.sample_state)
             await websocket.send_json(reply)
     except WebSocketDisconnect:
-        logger.info("realtime ws disconnected")
+        logger.info("realtime ws disconnected client=%s bound_session_id=%s", client, bound_session_id)
     except Exception as exc:
-        logger.exception("realtime ws error")
+        logger.exception("realtime ws error client=%s bound_session_id=%s", client, bound_session_id)
         try:
             await websocket.send_json({"cmd": "error", "message": str(exc)})
         except Exception:
             pass
     finally:
-        try:
-            bridge.motion.close_realtime_session()
-        except Exception:
-            pass
+        if bound_session_id is not None and bridge.motion.realtime_session_id() == bound_session_id:
+            logger.info("realtime ws cleanup_close client=%s session_id=%s", client, bound_session_id)
+            try:
+                bridge.motion.close_realtime_session(session_id=bound_session_id, terminal_reason="stopped")
+            except Exception:
+                pass
+        elif bound_session_id is not None:
+            logger.info(
+                "realtime ws cleanup_skip client=%s session_id=%s active_session_id=%s",
+                client,
+                bound_session_id,
+                bridge.motion.realtime_session_id(),
+            )
 
 
 @router.websocket("/v1/ws/audio")
@@ -134,6 +203,7 @@ async def ws_audio(websocket: WebSocket) -> None:
                             bridge.audio.start_stream_with_rights,
                             force=bool(payload.get("force", False)),
                             reacquire_if_needed=payload.get("reacquire_if_needed"),
+                            backend=payload.get("backend"),
                         )
                         await websocket.send_json({"cmd": "started", **result})
                     elif payload.get("cmd") == "stop":

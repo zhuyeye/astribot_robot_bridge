@@ -116,7 +116,7 @@ asyncio.run(main())
 # 1) 开会话
 curl -X POST http://ORIN:8080/v1/motion/realtime/session \
   -H 'Content-Type: application/json' \
-  -d '{"rate_hz":50,"space":"joints"}'
+  -d '{"source_hz":30,"control_hz":250,"space":"joints"}'
 
 # 2) 下发（或走 WS /v1/ws/realtime）
 curl -X POST http://ORIN:8080/v1/motion/realtime/command \

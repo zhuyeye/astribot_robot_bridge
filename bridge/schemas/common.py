@@ -47,6 +47,29 @@ class ControlBusyError(BridgeError):
         )
 
 
+class StaleSessionError(BridgeError):
+    def __init__(
+        self,
+        *,
+        provided_session_id: str | None = None,
+        expected_session_id: str | None = None,
+        active_session_id: str | None = None,
+        active_mode: str | None = None,
+    ) -> None:
+        details = {
+            "provided_session_id": provided_session_id,
+            "expected_current_session_id": expected_session_id,
+            "active_session_id": active_session_id,
+            "active_mode": active_mode,
+        }
+        super().__init__(
+            "stale_session",
+            "request no longer matches active control context",
+            status_code=409,
+            details={k: v for k, v in details.items() if v is not None},
+        )
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return ApiResponse(ok=True, data=data).model_dump()
 

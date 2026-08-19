@@ -63,6 +63,8 @@ class BridgeClient:
         request_id: str = "",
         force: bool = False,
         reacquire_if_needed: bool | None = None,
+        expected_current_session_id: str | None = None,
+        supersedes_session_id: str | None = None,
     ) -> Any:
         return self._unwrap(
             self._client.post(
@@ -72,12 +74,16 @@ class BridgeClient:
                     "request_id": request_id,
                     "force": force,
                     "reacquire_if_needed": reacquire_if_needed,
+                    "expected_current_session_id": expected_current_session_id,
+                    "supersedes_session_id": supersedes_session_id,
                 },
             )
         )
 
-    def stop_action(self) -> Any:
-        return self._unwrap(self._client.post("/v1/actions/stop"))
+    def stop_action(self, session_id: str, *, request_id: str = "") -> Any:
+        return self._unwrap(
+            self._client.post("/v1/actions/stop", json={"session_id": session_id, "request_id": request_id})
+        )
 
     def move_to_home(
         self,
@@ -105,6 +111,8 @@ class BridgeClient:
         wait: bool = False,
         force: bool = False,
         reacquire_if_needed: bool | None = None,
+        request_id: str = "",
+        expected_current_session_id: str | None = None,
     ) -> Any:
         return self._unwrap(
             self._client.post(
@@ -115,6 +123,8 @@ class BridgeClient:
                     "wait": wait,
                     "force": force,
                     "reacquire_if_needed": reacquire_if_needed,
+                    "request_id": request_id,
+                    "expected_current_session_id": expected_current_session_id,
                 },
             )
         )
@@ -125,8 +135,10 @@ class BridgeClient:
     def realtime_command(self, **kwargs: Any) -> Any:
         return self._unwrap(self._client.post("/v1/motion/realtime/command", json=kwargs))
 
-    def close_realtime(self) -> Any:
-        return self._unwrap(self._client.post("/v1/motion/realtime/close"))
+    def close_realtime(self, session_id: str, *, request_id: str = "") -> Any:
+        return self._unwrap(
+            self._client.post("/v1/motion/realtime/close", json={"session_id": session_id, "request_id": request_id})
+        )
 
     def estop(self) -> Any:
         return self._unwrap(self._client.post("/v1/motion/estop"))
@@ -185,7 +197,8 @@ def main() -> None:
     p_play = sub.add_parser("play")
     p_play.add_argument("action_id")
     p_play.add_argument("--force", action="store_true")
-    sub.add_parser("stop-action")
+    p_stop = sub.add_parser("stop-action")
+    p_stop.add_argument("session_id")
     p_home = sub.add_parser("home")
     p_home.add_argument("--wait", action="store_true")
     sub.add_parser("estop")
@@ -216,7 +229,7 @@ def main() -> None:
         elif args.cmd == "play":
             data = client.play(args.action_id, force=args.force)
         elif args.cmd == "stop-action":
-            data = client.stop_action()
+            data = client.stop_action(args.session_id)
         elif args.cmd == "home":
             data = client.move_to_home(wait=args.wait)
         elif args.cmd == "estop":

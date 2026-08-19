@@ -38,8 +38,17 @@ class StateConfig(BaseModel):
 class RealtimeConfig(BaseModel):
     max_hz: float = 250.0
     default_hz: float = 50.0
+    # Output rate to SDK set_joints_position. Prefer control_hz; rate_hz remains an alias.
+    control_hz: float = 250.0
+    # Used only when session omits source_hz and no prior frame interval is known yet.
+    default_source_hz: float = 30.0
+    min_blend_s: float = 0.01
+    max_blend_s: float = 0.2
     control_way: str = "filter"
+    # Max joint change between client frames at source_hz; scaled to per-SDK-tick in worker.
     max_step_delta_rad: float = 0.35
+    # Loosen per-tick clamp (1.0 = strict scale; 2.0 = allow 2x).
+    step_delta_slack: float = 2.0
     max_abs_rad: float = 3.5
     gripper_min: float = 0.0
     gripper_max: float = 100.0
