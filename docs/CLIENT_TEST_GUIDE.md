@@ -4,6 +4,8 @@
 
 **完整 API 接入说明（端点索引、协议、WebSocket 格式、业务流）：** [API_REFERENCE.md](API_REFERENCE.md)
 
+**客户端推荐状态机 / session 编排协议：** [CLIENT_SESSION_PROTOCOL.md](CLIENT_SESSION_PROTOCOL.md)
+
 | 项 | 默认值 |
 |----|--------|
 | Orin Bridge 地址 | `http://<ORIN_IP>:8080` |
@@ -92,6 +94,7 @@ astribot_robot_bridge/clients/python/bridge_client.py
 | code | HTTP | 含义 |
 |------|------|------|
 | `control_busy` | 409 | 其它运动模式占用控制权；可加 `force: true` |
+| `stale_session` | 409 | 请求已经迟到；Bridge 已 no-op，不应重试抢占 |
 | `unknown_action` | 404 | 动作 id 不存在 |
 | `wrong_mode` / `realtime_inactive` | 409 | 实时会话未开或模式不对 |
 | `unauthorized` | 401 | API Key 错误 |
@@ -225,8 +228,10 @@ curl -i -X POST "$BRIDGE/v1/actions/play" \
   -H 'Content-Type: application/json' \
   -d '{"action_id":"wave","request_id":"test-1","force":false}'
 
-# 同动作重复 play 可能 accepted=false（非错误）
-curl -s -X POST "$BRIDGE/v1/actions/stop" | python3 -m json.tool
+# 停止 playback 必须带 session_id
+curl -s -X POST "$BRIDGE/v1/actions/stop" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"playback:41","request_id":"stop-wave-001"}' | python3 -m json.tool
 ```
 
 常用 `action_id`（以 Orin manifest 为准，`list` 为准）：
@@ -261,7 +266,9 @@ curl -s -X POST "$BRIDGE/v1/motion/move_to/joints" \
     "targets": {"astribot_head": [0.0, 0.0]},
     "duration": 2.0,
     "wait": true,
-    "force": true
+    "force": true,
+    "request_id": "move-first-frame-001",
+    "expected_current_session_id": "playback:41"
   }' | python3 -m json.tool
 ```
 
@@ -270,16 +277,24 @@ curl -s -X POST "$BRIDGE/v1/motion/move_to/joints" \
 ```bash
 curl -s -X POST "$BRIDGE/v1/motion/realtime/session" \
   -H 'Content-Type: application/json' \
-  -d '{"rate_hz":50,"space":"joints","force":true}' | python3 -m json.tool
+  -d '{"source_hz":50,"control_hz":250,"space":"joints","force":true,"prefer_latest":true,"ack_mode":"drain_async","request_id":"open-rt-001","expected_current_session_id":"playback:41"}' | python3 -m json.tool
 
 curl -s -X POST "$BRIDGE/v1/motion/realtime/command" \
   -H 'Content-Type: application/json' \
-  -d '{"targets":{"astribot_head":[0.0,0.0]}}' | python3 -m json.tool
+  -d '{"session_id":"realtime:42","targets":{"astribot_head":[0.0,0.0]}}' | python3 -m json.tool
 
-curl -s -X POST "$BRIDGE/v1/motion/realtime/close" | python3 -m json.tool
+curl -s -X POST "$BRIDGE/v1/motion/realtime/close" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"realtime:42","request_id":"close-rt-001"}' | python3 -m json.tool
 ```
 
 > 50Hz+ 闭环请用 WebSocket（见第 5 节），不要用 REST 逐帧。
+
+Session fencing 联调建议：
+
+- `play(idle)`、`move_to(first_frame)`、`open_realtime` 带 `expected_current_session_id`
+- `stop`、`close`、WS `command` 带 `session_id`
+- 收到 `stale_session` 说明请求已迟到，客户端应忽略这条旧请求
 
 ### 3.6 夹爪 / 设置 / 急停
 
@@ -306,6 +321,11 @@ curl -s "$BRIDGE/v1/audio/status" | python3 -m json.tool
 curl -s "$BRIDGE/v1/audio/system-volume" | python3 -m json.tool
 
 curl -s -X POST "$BRIDGE/v1/audio/play" \
+  -H 'Content-Type: application/json' \
+  -d '{"clip_id":"hello","force":true}' | python3 -m json.tool
+
+# 经系统声卡播放（不走机器人 SDK，与 system-volume 同一 sink）
+curl -s -X POST "$BRIDGE/v1/audio/system-play" \
   -H 'Content-Type: application/json' \
   -d '{"clip_id":"hello","force":true}' | python3 -m json.tool
 
@@ -342,6 +362,9 @@ curl -s -X POST "$BRIDGE/v1/audio/stop" | python3 -m json.tool
 - `worker_error`
 - `last_frame_ts` / `last_publish_ts`
 - `dropped_frames`
+- `dump_path` / `dump_frames_written`（收到的流式 PCM 落盘路径）
+
+流式音频默认会把**收到的 PCM**写成 `logs/audio_dumps/received_YYYYMMDD_HHMMSS.wav`（配置 `audio.dump_received_wav`）。听这个 wav 可判断断续是在客户端发送侧，还是 SDK/扬声器侧。关闭：`dump_received_wav: false`。
 
 如果你怀疑“发过音频后 bridge 卡住”，先看这里，再去查对应 `X-Request-Id` 的日志。
 
@@ -532,7 +555,7 @@ WS = "ws://192.168.0.10:8080/v1/ws/realtime"
 async def main():
     # 抢占控制权并开会话
     with httpx.Client(base_url=BASE, timeout=10) as c:
-        r = c.post("/v1/motion/realtime/session", json={"rate_hz": 50, "space": "joints", "force": True})
+        r = c.post("/v1/motion/realtime/session", json={"source_hz": 50, "control_hz": 250, "space": "joints", "force": True, "prefer_latest": True, "ack_mode": "drain_async"})
         r.raise_for_status()
         print(r.json())
 
@@ -566,12 +589,19 @@ asyncio.run(main())
 | `targets` | `{ "astribot_torso": [...], ... }` 按 part 分组 |
 | `q` + `layout` | 扁平向量 + part 顺序列表（默认轨迹 22 维 layout） |
 | `names` + `poses` | `space=cartesian` 时使用 |
-| `check_step_delta` | 默认 true；首帧对齐可先 `false` 或先 MoveTo |
-| `return_state` | true 时 ack 带当前 state |
+| `check_step_delta` | 默认 true：在 **control_hz 输出、下发 SDK 前** 做步长 clamp（不拒收 Client 帧）；false 关闭 |
+| `return_state` | true 时 ack 带当前 state（`ack_mode=none` 时无效） |
 
-安全拒绝时 `accepted=false`，并带 `violations`（限位 / 单步过大等）。
+Session 可选：`prefer_latest`（默认 true，latest-wins）、`ack_mode`（`every`/`drain_async`/`none`）。
+
+安全拒绝时 `accepted=false`，并带 `violations`（硬限位等）。步长过大默认 clamp，不因 Δq 拒整帧。close/play 后迟到 command 回 `accepted=false` + `reason`，不打断 WS。
 
 ### 5.3 音频流 ` /v1/ws/audio`
+
+`stream/start` 可带 `backend`：
+
+- `"sdk"`（默认）：机器人 ROS speaker
+- `"system"`：Orin Pulse 系统音箱（与 system-volume 相同）
 
 二进制帧布局（big-endian 头 + little-endian float32 PCM）：
 
@@ -596,7 +626,7 @@ def pack_frame(seq: int, samples: np.ndarray, sr=32000, ch=1) -> bytes:
 
 async def main():
     with httpx.Client(base_url=BASE) as c:
-        c.post("/v1/audio/stream/start", json={"force": True}).raise_for_status()
+        c.post("/v1/audio/stream/start", json={"force": True, "backend": "system"}).raise_for_status()
 
     # 1 秒 440Hz 正弦，按 100ms 切块
     sr, chunk_ms = 32000, 100
@@ -727,7 +757,7 @@ curl -s -X POST "$BRIDGE/v1/actions/play" \
 | play 404 | `GET /v1/actions/` 核对 id；manifest 软链 |
 | realtime 全被拒 | 检查 violations；减小步长或先 move_to |
 | WS 立刻断开 | 用 `ws://` 不是 `http://`；确认端口 8080 |
-| 音频无声 | 先 `GET /v1/audio/status` 看 `received_frames`/`published_frames`；ROS `ros2 topic info /astribot_audio/speaker/stream` 订阅数是否为 0；见 [API_REFERENCE.md](API_REFERENCE.md) §5.3 |
+| 音频无声 / 断续 | 先听 `logs/audio_dumps/received_*.wav`（Bridge 实际收到的内容）；再看 `GET /v1/audio/status` 的 `received_frames`/`published_frames`；ROS `ros2 topic info /astribot_audio/speaker/stream` 订阅数是否为 0 |
 | HTTP 401 | 配置了 `http.api_key`，请求加 `X-API-Key` |
 | 想查某次失败的完整链路 | 先记下响应头 `X-Request-Id`，再 `grep`/搜索 `logs/bridge.log` |
 

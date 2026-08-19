@@ -8,6 +8,7 @@
 | OpenAPI（可交互） | `http://<ORIN_IP>:8080/docs` |
 | OpenAPI JSON | `http://<ORIN_IP>:8080/openapi.json` |
 | 联调与 curl 示例 | [CLIENT_TEST_GUIDE.md](CLIENT_TEST_GUIDE.md) |
+| 客户端状态机建议 | [CLIENT_SESSION_PROTOCOL.md](CLIENT_SESSION_PROTOCOL.md) |
 | Python 薄客户端 | `clients/python/bridge_client.py` |
 
 ---
@@ -108,6 +109,33 @@ HTTP **202**：已接收并开始后台任务，**不表示动作已结束**。M
 | `force` | bool | 抢占当前运动模式 |
 | `reacquire_if_needed` | bool \| null | 失权时是否尝试重抢控制权；`null` 用服务端默认 |
 | `wait` | bool | MoveTo：true 同步等待完成；false 返回 202 + task |
+| `request_id` | string | 客户端请求轮次 id，用于日志对账 |
+| `session_id` | string | 操作已有 `playback` / `realtime` 会话时必带 |
+| `expected_current_session_id` | string | 启动新动作前的条件校验，避免迟到请求污染新会话 |
+| `supersedes_session_id` | string | 可选，仅用于表达“本轮替换谁” |
+
+### 2.6 Session fencing 规则
+
+Bridge 现在会维护统一控制上下文，并对所有会改机器人状态的请求做 fencing：
+
+- `session_id`：用于操作已存在会话，如 `actions/stop`、`realtime/close`、`realtime/command`
+- `expected_current_session_id`：用于启动新动作前做条件校验，如 `play(idle)`、`move_to(first_frame)`、`realtime/session`
+
+若请求已过期，返回：
+
+```json
+{
+  "ok": false,
+  "data": null,
+  "error": {
+    "code": "stale_session",
+    "message": "request no longer matches active control context",
+    "details": {
+      "active_session_id": "realtime:43"
+    }
+  }
+}
+```
 
 ---
 
@@ -176,11 +204,12 @@ HTTP **202**：已接收并开始后台任务，**不表示动作已结束**。M
 | GET | `/v1/audio/clips` | 数据集 wav 列表 |
 | GET | `/v1/audio/status` | 播放/流状态、队列、worker |
 | GET | `/v1/audio/system-volume` | 系统音量 |
-| POST | `/v1/audio/play` | 播放 clip |
+| POST | `/v1/audio/play` | 经机器人 SDK 播放 clip |
+| POST | `/v1/audio/system-play` | 经 Pulse Yundea USB sink 播放 clip |
 | POST | `/v1/audio/stop` | 停止并 deactivate |
-| POST | `/v1/audio/stream/start` | 准备接收 WS PCM |
+| POST | `/v1/audio/stream/start` | 准备接收 WS PCM（`backend`: `sdk`\|`system`） |
 | POST | `/v1/audio/stream/stop` | 同 stop |
-| POST | `/v1/audio/system-volume` | 设置系统音量 |
+| POST | `/v1/audio/system-volume` | 设置 Yundea sink 音量 |
 
 ### 3.7 WebSocket
 
@@ -204,11 +233,13 @@ Content-Type: application/json
   "action_id": "speak",
   "request_id": "client-session-001",
   "force": true,
-  "reacquire_if_needed": true
+  "reacquire_if_needed": true,
+  "expected_current_session_id": "playback:41",
+  "supersedes_session_id": "playback:41"
 }
 ```
 
-响应常为 **202**，`data` 含 `action_id`（解析后）、`generation` 等。
+响应常为 **202**，`data` 含 `action_id`（解析后）、`session_id`、`generation` 等。
 
 ### 4.2 MoveTo 关节（异步）
 
@@ -220,23 +251,61 @@ Content-Type: application/json
   "duration": 2.0,
   "use_wbc": false,
   "wait": false,
-  "force": false
+  "force": false,
+  "request_id": "move-to-first-frame",
+  "expected_current_session_id": "playback:41"
 }
 ```
 
 ### 4.3 实时会话 + 关节指令
 
+默认 **latest-wins**：客户端按固定 `source_hz`（如 50）只推最新 qpos；Orin 覆盖写 `latest_target`，以 `control_hz`（默认 250）clamp 追赶下发，**不排队播帧**。
+
 ```json
 POST /v1/motion/realtime/session
-{ "rate_hz": 50, "space": "joints", "control_way": "filter", "force": true }
+{
+  "source_hz": 50,
+  "control_hz": 250,
+  "space": "joints",
+  "control_way": "filter",
+  "force": true,
+  "request_id": "speak-open-001",
+  "expected_current_session_id": "playback:41",
+  "prefer_latest": true,
+  "ack_mode": "drain_async"
+}
 
 POST /v1/motion/realtime/command
-{ "targets": { "astribot_head": [0.1, 0.0] }, "check_step_delta": true }
+{
+  "session_id": "realtime:42",
+  "targets": { "astribot_head": [0.1, 0.0] },
+  "check_step_delta": true
+}
 ```
 
-高频闭环请用 **`WS /v1/ws/realtime`**，不要用 REST 逐帧。
+字段说明：
 
-实时关节下发默认 `use_wbc=false` 的直接关节跟踪；`collision_avoidance` 主要作用于 WBC 模式，对纯关节 `set` 帮助有限。
+| 字段 | 含义 |
+|------|------|
+| `source_hz` | 客户端发送频率（可选）。`prefer_latest=false` 时用于 blend 时长；latest-wins 路径主要用于步长缩放 |
+| `control_hz` | Orin→SDK 输出频率，默认配置 `250` |
+| `rate_hz` | 兼容旧字段：仅传 `rate_hz` 时当作 `source_hz` 并上采样到默认 `control_hz`；若同时传了 `source_hz`，则 `rate_hz` 当作 `control_hz` |
+| `prefer_latest` | 默认 `true`：覆盖写最新目标 + 每 tick clamp 追赶。`false` 保留旧 from→to 时间插值 |
+| `ack_mode` | `every` / `drain_async`：WS 每帧回 ack；`none`：不回。未知值按 `every` |
+
+高频闭环请用 **`WS /v1/ws/realtime`**，不要用 REST 逐帧。Ack **不作为发送门闩**；客户端可异步 drain。
+
+实时关节下发默认 `use_wbc=false` 的直接关节跟踪。`check_step_delta` 在 Bridge 侧表示对 **control_hz 输出** 做步长 clamp，不再因 Client 两帧间距大而拒收整帧。关节硬限位仍按 `SDK_LIMITS` + 配置检查 incoming 目标。command 响应 `queued=false`。
+
+关闭 realtime：
+
+```json
+POST /v1/motion/realtime/close
+{
+  "session_id": "realtime:42",
+  "request_id": "speak-close-001"
+}
+```
 
 ### 4.4 运动设置（自碰撞规避）
 
@@ -258,16 +327,29 @@ POST /v1/audio/play
 { "clip_id": "hello", "mode": "service", "force": true }
 ```
 
-`mode`: `service`（wav 服务）| `stream`（topic 分块）。
+`mode`: `service`（wav 服务）| `stream`（topic 分块）。走机器人 SDK / ROS speaker。
+
+经 **Yundea USB 扬声器**（Pulse sink 名含 `Yundea`）播放：
+
+```json
+POST /v1/audio/system-play
+{ "clip_id": "hello", "force": true }
+```
+
+不调用 SDK，`paplay --device=<Yundea>`。`POST /v1/audio/stop` 可打断。
 
 ### 4.6 系统音量
 
+Bridge 启动时会把 Pulse 默认 sink 设为 Yundea，并把音量设为 **75%**。之后仍可用 API 改音量（改的就是这条 Yundea sink）：
+
 ```json
+GET /v1/audio/system-volume
+
 POST /v1/audio/system-volume
 { "volume_percent": 60, "unmute": true }
 ```
 
-建议在**开始流式播放之前**设好音量；播放过程中改音量可能影响底层 sink，必要时 `stop` 后重新 `stream/start`。
+建议在**开始流式播放之前**设好音量。
 
 ---
 
@@ -289,12 +371,12 @@ ws://<ORIN>:8080/v1/ws/state?hz=50&fields=joints.pos,joints.vel
 
 | `cmd` / 行为 | 说明 |
 |--------------|------|
-| `{"cmd":"open", "rate_hz":50, "space":"joints", "force":true}` | 开会话 |
-| `{"cmd":"command", "targets":{...}, "seq":1}` | 下发（与 REST command 类似） |
-| `{"cmd":"close"}` | 关闭 |
+| `{"cmd":"open", "source_hz":50, "control_hz":250, "space":"joints", "force":true, "prefer_latest":true, "ack_mode":"drain_async"}` | 开会话（默认 latest-wins） |
+| `{"cmd":"command", "targets":{...}, "seq":1}` | 覆盖写最新目标；可选回 ack |
+| `{"cmd":"close"}` | 关闭；迟到 command 软拒收 |
 | `{"cmd":"ping"}` | 心跳 |
 
-断开连接后 Bridge 会尝试关闭 realtime 会话。
+`ack_mode=none` 时不回每帧 ack。断开连接后 Bridge 会尝试关闭 realtime 会话。
 
 ### 5.3 音频流 `WS /v1/ws/audio`
 
@@ -304,6 +386,22 @@ ws://<ORIN>:8080/v1/ws/state?hz=50&fields=joints.pos,joints.vel
 2. 连接 `WS /v1/ws/audio`
 3. 发送二进制帧
 4. `POST /v1/audio/stop` 或 WS `{"cmd":"stop"}`
+
+`backend` 可选：
+
+| 值 | 含义 |
+|----|------|
+| `sdk`（默认） | 发布到机器人 `/astribot_audio/speaker/stream` |
+| `system` | 写入 Orin Pulse（`pacat`），与 `system-volume` / `system-play` 同一音箱 |
+
+```json
+POST /v1/audio/stream/start
+{ "force": true, "backend": "system" }
+```
+
+或 WS：`{"cmd":"start","force":true,"backend":"system"}`
+
+帧格式与 `sdk` 完全相同，客户端只需改 `backend`。
 
 **二进制帧格式（小端 payload，大端头）：**
 
