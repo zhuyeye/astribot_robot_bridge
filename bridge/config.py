@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -58,6 +58,18 @@ class AudioConfig(BaseModel):
     dataset_dir: str = "/home/astribot/audio_dataset"
     chunk_seconds: float = 0.1
     default_mode: str = "service"
+    # When stream/start omits backend, use this (sdk | system).
+    # system = paplay/pacat → Pulse Yundea USB speaker (not built-in APE).
+    default_stream_backend: Literal["sdk", "system"] = "sdk"
+    # If set, all PCM streams use this backend; client cannot override.
+    force_stream_backend: Literal["sdk", "system"] | None = None
+    # Empty = auto-detect a Pulse sink whose name contains system_sink_match.
+    system_sink: str = ""
+    system_sink_match: str = "Yundea"
+    # Applied at Bridge startup. Later POST /v1/audio/system-volume overrides it.
+    default_system_volume_percent: int = Field(default=75, ge=0, le=150)
+    dump_received_wav: bool = False
+    dump_dir: str = "logs/audio_dumps"
 
 
 class ControlRightsConfig(BaseModel):

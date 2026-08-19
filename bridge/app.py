@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI):
         on_estop_hooks=[trajectory_svc.interrupt_for_estop],
     )
     audio_svc = AudioService(audio_robot, config)
+    audio_svc.apply_system_audio_defaults()
     rights.register_loss_callback(trajectory_svc.on_control_rights_lost)
     rights.register_loss_callback(motion_svc.on_control_rights_lost)
     rights.start()

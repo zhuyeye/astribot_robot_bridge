@@ -8,6 +8,7 @@ from bridge.schemas.common import ok
 from bridge.schemas.requests import (
     AudioPlayRequest,
     AudioStreamStartRequest,
+    AudioSystemPlayRequest,
     AudioSystemVolumeRequest,
 )
 
@@ -48,6 +49,24 @@ async def play(request: Request, body: AudioPlayRequest) -> dict:
     return ok(result)
 
 
+@router.post("/system-play")
+async def system_play(request: Request, body: AudioSystemPlayRequest) -> dict:
+    """Play wav via paplay → Pulse Yundea USB sink, no SDK speaker topic."""
+    result = _state(request).audio.play_system_clip(
+        clip_id=body.clip_id,
+        path=body.path,
+        force=body.force,
+    )
+    result.update(
+        {
+            "resource": "audio.system_playback",
+            "execution": "async",
+            "operation_status": "accepted",
+        }
+    )
+    return ok(result)
+
+
 @router.post("/stop")
 async def stop(request: Request) -> dict:
     bridge = _state(request)
@@ -64,6 +83,7 @@ async def stream_start(request: Request, body: AudioStreamStartRequest | None = 
             bridge.audio.start_stream_with_rights,
             force=body.force,
             reacquire_if_needed=body.reacquire_if_needed,
+            backend=body.backend,
         )
     result.update({"resource": "audio.stream", "execution": "sync", "operation_status": "opened"})
     return ok(result)

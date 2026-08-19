@@ -37,6 +37,14 @@ audio:
   dataset_dir: "/home/astribot/audio_dataset"
   chunk_seconds: 0.1
   default_mode: "service"  # service | stream
+  # system = paplay/pacat → Pulse Yundea 8MICA USB speaker (not built-in APE)
+  default_stream_backend: system
+  force_stream_backend: system   # PCM 流固定走 Pulse，忽略 client 的 sdk
+  system_sink: ""                # empty = match system_sink_match
+  system_sink_match: Yundea
+  default_system_volume_percent: 75   # startup default; API can change later
+  dump_received_wav: false
+  dump_dir: "logs/audio_dumps"
 
 control_rights:
   auto_reacquire: true

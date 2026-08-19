@@ -361,6 +361,63 @@ def test_move_to_rejects_stale_expected_session() -> None:
         svc.close_realtime_session(session_id=next_opened["session_id"])
 
 
+def test_audio_dump_wav_roundtrip(tmp_path) -> None:
+    import struct
+    import wave
+
+    from bridge.config import AudioConfig, BridgeConfig
+    from bridge.domain.audio_service import AudioService
+
+    class _AudioFakeRobot:
+        audio_activated = True
+
+        def deactivate_audio(self) -> None:
+            return None
+
+    cfg = BridgeConfig(
+        audio=AudioConfig(
+            dump_received_wav=True,
+            dump_dir=str(tmp_path),
+        )
+    )
+    svc = AudioService(_AudioFakeRobot(), cfg)  # type: ignore[arg-type]
+    with svc._lock:
+        svc._stream_active = True
+        svc._prepare_dump_session_unlocked()
+        path = svc._dump_path
+        assert path is not None
+
+    samples = [0.0, 0.5, -0.5, 1.0]
+    payload = struct.pack(f"<{len(samples)}f", *samples)
+    frame = struct.pack("!IIHH", 0, 16000, 1, 0) + payload
+    result = svc.push_pcm_frame(frame)
+    assert result["accepted"] is True
+
+    with svc._lock:
+        closed = svc._close_dump_wav_unlocked()
+    assert closed == path
+    assert path.is_file()
+    with wave.open(str(path), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getframerate() == 16000
+        assert wf.getnframes() == len(samples)
+
+
+def test_match_yundea_pulse_sink() -> None:
+    from bridge.domain.audio_service import match_pulse_sink
+
+    short = (
+        "0\talsa_output.usb-Yundea_Technology_Yundea_8MICA_433136363335352E-01.analog-stereo"
+        "\tmodule-alsa-card.c\ts16le 2ch 32000Hz\tSUSPENDED\n"
+        "1\talsa_output.platform-sound.analog-stereo\tmodule-alsa-card.c"
+        "\ts16le 2ch 44100Hz\tSUSPENDED\n"
+    )
+    sink = match_pulse_sink(short, "Yundea")
+    assert sink is not None
+    assert "Yundea_8MICA" in sink
+    assert match_pulse_sink(short, "missing") is None
+
+
 if __name__ == "__main__":
     test_joint_dof_constants()
     test_flatten_roundtrip()
@@ -376,7 +433,10 @@ if __name__ == "__main__":
     test_realtime_prefer_latest_overwrites_target()
     test_realtime_ack_mode_normalize()
     test_realtime_blend_path_when_prefer_latest_false()
-    test_control_context_matches_last_terminal_session()
-    test_realtime_command_rejects_stale_session()
-    test_move_to_rejects_stale_expected_session()
+    from pathlib import Path
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        test_audio_dump_wav_roundtrip(Path(td))
+    test_match_yundea_pulse_sink()
     print("ok")

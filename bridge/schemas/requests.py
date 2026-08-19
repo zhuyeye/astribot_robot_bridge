@@ -137,9 +137,18 @@ class AudioPlayRequest(BaseModel):
     reacquire_if_needed: bool | None = None
 
 
+class AudioSystemPlayRequest(BaseModel):
+    clip_id: str | None = None
+    path: str | None = None
+    force: bool = False
+
+
 class AudioStreamStartRequest(BaseModel):
     force: bool = False
     reacquire_if_needed: bool | None = None
+    # sdk: ROS /astribot_audio/speaker/stream
+    # system: pacat → Pulse Yundea 8MICA USB (not built-in APE)
+    backend: Literal["sdk", "system"] | None = None
 
 
 class AudioSystemVolumeRequest(BaseModel):

@@ -163,6 +163,20 @@ class BridgeClient:
             )
         )
 
+    def play_system_audio(
+        self,
+        *,
+        clip_id: str | None = None,
+        path: str | None = None,
+        force: bool = False,
+    ) -> Any:
+        return self._unwrap(
+            self._client.post(
+                "/v1/audio/system-play",
+                json={"clip_id": clip_id, "path": path, "force": force},
+            )
+        )
+
     def stop_audio(self) -> Any:
         return self._unwrap(self._client.post("/v1/audio/stop"))
 
